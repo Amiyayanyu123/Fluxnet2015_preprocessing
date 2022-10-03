@@ -1,0 +1,394 @@
+library(reshape2)
+library(tidyverse)
+library(bootstrap)
+library(QuantPsyc) 
+library(relaimpo)
+library(psych)
+library(ggplot2)
+library(nlme)
+library(ape)
+library(MuMIn)
+library(ggstatsplot)
+library(extrafont)
+library(extrafont)
+library(lubridate)
+
+
+setwd("E:\\Fluxnet\\UP_fluxnet2015\\HH")
+data<-read_csv("FLX_US-WCr_FLUXNET2015_FULLSET_HH_1999-2014_1-4.csv",na='-9999')
+
+  
+yearly_data_extract = function (data){
+  
+  subdata_1 = data %>% dplyr::select(TIMESTAMP_START,NEE_VUT_MEAN, CO2_F_MDS,P_F, #select variables
+                                     LE_F_MDS,VPD_F_MDS,TA_F_MDS,SWC_F_MDS_1,GPP_DT_VUT_MEAN ) %>% 
+    rename(time = TIMESTAMP_START,nee = NEE_VUT_MEAN, CO2 = CO2_F_MDS, 
+           LE = LE_F_MDS,VPD = VPD_F_MDS,Temp = TA_F_MDS,swc = SWC_F_MDS_1,Pre = P_F,gpp = GPP_DT_VUT_MEAN ) %>% 
+    mutate(date = parse_datetime(as.character(time), '%Y%m%d%H%M')) 
+  
+  yearly_data_by_na = subdata_1 %>%
+    mutate(Year = year(date)) %>% # yearly statistics
+    group_by(Year) %>%
+    summarize(NA_CO2_ratio = sum(is.na(CO2))/48*365) %>% # exclue the years containing much NA values
+    filter(NA_CO2_ratio <= 0.5) %>%
+    dplyr::select(Year) # choose CO2 as metric to exclude years which have many NA values
+  
+  year_list = yearly_data_by_na$Year # seleted years
+  ######################################### data
+  yearly_Hour_data = subdata_1 %>% # year hourly data to extract the nighttime and daytime
+    mutate(Hour = hour(date),Year = year(date)) %>%
+    dplyr:: filter(Year %in% year_list) %>%
+    group_by(Year,Hour) %>% 
+    summarize(nee = mean(nee,na.rm = TRUE),
+              CO2 = mean(CO2,na.rm = TRUE),
+              LE = mean(LE,na.rm = TRUE),
+              VPD = mean(VPD,na.rm = TRUE),
+              Temp = mean(Temp,na.rm = TRUE),
+              swc = mean(swc,na.rm = TRUE),
+              Pre = mean(Pre,na.rm = TRUE),
+              gpp = mean(gpp,na.rm = TRUE)) %>%
+    transform(wue = gpp/LE)
+  
+  night_yearly = yearly_Hour_data %>%
+    dplyr:: filter( nee > 0 ) %>%
+    group_by(Year) %>% 
+    summarize(d_nee = mean(nee,na.rm = TRUE),
+              d_CO2 = mean(CO2,na.rm = TRUE),
+              d_LE = mean(LE,na.rm = TRUE),
+              d_VPD = mean(VPD,na.rm = TRUE),
+              d_Temp = mean(Temp,na.rm = TRUE),
+              d_swc = mean(swc,na.rm = TRUE),
+              d_Pre = mean(Pre,na.rm = TRUE))
+  
+  day_yearly = yearly_Hour_data %>%
+    dplyr:: filter( nee < 0 ) %>%
+    group_by(Year) %>% 
+    summarize(n_nee = mean(nee,na.rm = TRUE),
+              n_CO2 = mean(CO2,na.rm = TRUE),
+              n_LE = mean(LE,na.rm = TRUE),
+              n_VPD = mean(VPD,na.rm = TRUE),
+              n_Temp = mean(Temp,na.rm = TRUE),
+              n_swc = mean(swc,na.rm = TRUE),
+              n_Pre = mean(Pre,na.rm = TRUE))
+  
+  yearly_data = subdata_1 %>%
+    mutate(Year = year(date)) %>%
+    dplyr:: filter(Year %in% year_list) %>%
+    group_by(Year) %>% 
+    summarize(nee = mean(nee,na.rm = TRUE),
+              CO2 = mean(CO2,na.rm = TRUE),
+              LE = mean(LE,na.rm = TRUE),
+              VPD = mean(VPD,na.rm = TRUE),
+              Temp = mean(Temp,na.rm = TRUE),
+              swc = mean(swc,na.rm = TRUE),
+              Pre = mean(Pre,na.rm = TRUE),
+              gpp = mean(gpp,na.rm = TRUE)) %>%
+    transform(wue = gpp/LE)
+  
+  #################Rain-free day defined as three days after rain
+  Rain_days = subdata_1 %>%
+    mutate(Rain = as.numeric(Pre > 0)) # judge if this hour raining
+  
+  Rain_days_vector = as.data.frame(Rain_days$Rain)
+  Rain_days_lag3days = {}
+  
+  for (b in 1:144) { # lag three days 
+    lag_data = as.data.frame(dplyr::lag(Rain_days_vector,b))
+    Rain_days_lag3days = qpcR:::cbind.na(Rain_days_lag3days,lag_data)
+  }
+  
+  Rain_free  = as.data.frame(apply(qpcR:::cbind.na(Rain_days_lag3days,Rain_days_vector), 1, sum, na.rm=T))
+  colnames(Rain_free) = c("Rain_free") # therefore we have rain time and rainfree time
+  ########################calculated Rk = Night ET/ rain-free daily ET
+  
+  daytime_et = cbind(subdata_1,Rain_free) %>%
+    mutate(Year = year(date))  %>%
+    dplyr:: filter(Year %in% year_list) %>%
+    dplyr:: filter(Rain_free == 0 & nee < 0) %>%
+    group_by(Year) %>%
+    summarize(rain_free_et = mean(LE,na.rm = TRUE))
+  
+  nighttime_et = cbind(subdata_1,Rain_free) %>%
+    mutate(Year = year(date))  %>%
+    dplyr:: filter(Year %in% year_list) %>%
+    dplyr:: filter(Rain_free == 0 & nee > 0) %>%
+    group_by(Year) %>%
+    summarize(night_et = mean(LE,na.rm = TRUE))
+  
+  Rk = merge(daytime_et,nighttime_et) %>%
+    mutate(Rk = night_et/(rain_free_et+night_et)) 
+  
+  Final_data_1 = merge(day_yearly,night_yearly, by.x = "Year")
+  Final_data_2 = merge(Final_data_1,yearly_data, by.x = "Year")
+  Final_data = merge(Final_data_2,Rk, by.x = "Year")
+  
+  return(Final_data)
+}
+A = yearly_data_extract(data)
+#######################################
+setwd("E:\\Fluxnet\\UP_fluxnet2015\\HH")
+filenames <- list.files(pattern="*.csv", full.names=TRUE)
+
+ldf <- lapply(filenames, read_csv,na = "-9999") 
+
+names(ldf) <- filenames
+
+names = c("TIMESTAMP_START","NEE_VUT_MEAN","CO2_F_MDS","P_F",
+          "LE_F_MDS","VPD_F_MDS","TA_F_MDS","SWC_F_MDS_1","GPP_DT_VUT_MEAN")
+variables_number = lapply(sapply(ldf, colnames), function(x) x %in% names)
+count_number = lapply(variables_number,sum,na.rm = TRUE)
+filenames_contain_all = Filter(function(x) x == 9, count_number)
+filenames_select <- names(filenames_contain_all)
+
+ldf_final <- ldf[names(ldf) %in% filenames_select  ==  TRUE] ############select some sub-list contains all variables
+
+######
+extract_data = lapply(ldf_final, yearly_data_extract)
+
+setwd("E:\\Fluxnet\\UP_fluxnet2015\\processed")
+for(i in names(extract_data)){
+  write.csv(extract_data[[i]], paste0(i,".csv"),row.names=F,)
+}
+##############################################################################bootstrapped corr
+library("Hmisc")
+
+B <- 40000 #boot times
+num <- 10 # onece boot sample numbers from list
+n<-length (extract_data) #list lenth
+set.seed(123) 
+times_sum = sum(seq(1997,2014,by=1))
+corr_boot={}
+RK_boot={}
+judge_boot={}
+corr_boot_p = {}
+
+for(b in 1:B){
+  list_sub<-extract_data[sample(1:n,num,replace=F)]
+  
+  dt_sub_times = do.call(rbind.data.frame,list_sub)
+  dt_sub_times$Ratio = dt_sub_times$d_LE/(dt_sub_times$d_LE+dt_sub_times$n_LE)
+  
+  judge_times <- sum(unique(dt_sub_times$Year)) == times_sum
+  
+  mean_RK = mean(dt_sub_times$Rk,na.rm=T)
+  
+  corr = cor(dt_sub_times, method = c( "spearman"), use="complete.obs")[1,c(11,16:24,28)]
+  
+  corr_p <- rcorr(as.matrix(dt_sub_times), type = c("spearman"))$P[1,c(11,16:24,28)]
+  
+  print(corr)
+  RK_boot=rbind(RK_boot, mean_RK)
+  corr_boot=rbind(corr_boot,corr)
+  corr_boot_p=rbind(corr_boot_p,corr_p)
+  judge_boot=rbind(judge_boot,judge_times)
+}
+
+data_all = cbind(RK_boot,corr_boot,corr_boot_p,judge_boot)
+colnames(data_all) = c("RK","LE_N","NEE","CO2","LE","VPD","Temp","swc","Prep","gpp","WUE","Ratio",
+                       "p_LE_N","p_NEE","p_CO2","p_LE","p_VPD","p_Temp","p_swc","p_Prep","p_gpp","p_WUE","p_Ratio","Year")
+data_all = as.data.frame(data_all)
+full_year_boot = data_all %>% filter(Year == 1)
+write.csv(data_all, "bootstrapped_sample_p.csv",row.names=F)
+
+
+##################################################linear regression
+
+B <- 40000 #boot times
+num <- 10 # onece boot sample numbers from list
+n<-length (extract_data) #list lenth
+set.seed(123) 
+times_sum = sum(seq(1997,2014,by=1))
+corr_boot={}
+RK_boot={}
+judge_boot={}
+
+
+for(b in 1:B){
+  list_sub<-extract_data[sample(1:n,num,replace=F)]
+  
+  dt_sub_times = do.call(rbind.data.frame,list_sub)
+  
+  judge_times <- sum(unique(dt_sub_times$Year)) == times_sum
+  
+  mean_RK = mean(dt_sub_times$Rk,na.rm=T)
+  
+  mean_var = dt_sub_times %>%
+    dplyr::select(nee,CO2,LE,VPD,Temp,Pre,swc,gpp,wue,Year) %>% 
+    rename(v_nee = nee, V_CO2 =CO2,
+           V_LE = LE,V_VPD = VPD,V_Temp = Temp,V_swc = swc,V_Pre = Pre,V_gpp = gpp, V_wue = wue) %>%
+    summarise_at(vars(matches("V")), ~lm(scale(.) ~ scale(Year))$coefficients[2])
+  
+  print( mean_var)
+  
+  RK_boot=rbind(RK_boot, mean_RK)
+  corr_boot=rbind(corr_boot,mean_var)
+  judge_boot=rbind(judge_boot,judge_times)
+}
+
+data_all = cbind(RK_boot,corr_boot,judge_boot)
+colnames(data_all) = c("RK","NEE","CO2","LE","VPD","Temp","swc","Prep","gpp","WUE","Year")
+data_all = as.data.frame(data_all)
+full_year_boot = data_all %>% filter(Year == 1)
+write.csv(data_all, "bootstrapped_sample_linear.csv",row.names=F)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##########################################################sites trend analysis
+
+year_number = lapply(sapply(extract_data, rownames), function(x) length(x))
+filenames_filter_year = Filter(function(x) x > 6, year_number) #year
+filenames_select_year <- names(filenames_filter_year)
+extract_final <- extract_data[names(extract_data) %in% filenames_select_year  ==  TRUE] #
+
+trend = function(data) {
+  count_years = nrow(data)
+  
+  mean_RK = mean(data$Rk)
+  
+  mean_var = data %>%
+    dplyr::select(nee,CO2,LE,VPD,Temp,Pre,gpp,wue,Year) %>% 
+    rename(v_nee = nee, V_CO2 =CO2,
+           V_LE = LE,V_VPD = VPD,V_Temp = Temp,V_Pre = Pre,V_gpp = gpp, V_wue = wue) %>%
+    summarise_at(vars(matches("V")), ~lm(scale(.) ~ scale(Year))$coefficients[2])
+  
+  
+  final_result = cbind(mean_RK,mean_var,count_years)
+  return(final_result)
+}
+
+
+trend_data = lapply(extract_final, trend)
+
+trend = do.call(rbind.data.frame,trend_data)
+
+write.csv(trend, "trend.csv",row.names=F)
+#########################################################combine sites and analysis
+
+dt_table = do.call(rbind.data.frame,trend_data)
+
+write.table(dt_table,"trend_rk_station.csv", sep=",")
+
+ApplyQuintiles1 <- function(x) {
+  cut(x, breaks=c(quantile(x, probs = seq(0, 1, by = 0.2))),
+      labels=c("1","2","3","4","5"), include.lowest=TRUE)
+}
+dt_table$class_RK <- sapply(dt_table$mean_RK, ApplyQuintiles1)
+
+
+#########################################bootstrapped variables trend and Rk
+setwd("E:\\Fluxnet\\UP_fluxnet2015\\processed")
+
+filenames <- list.files(pattern="*.csv", full.names=TRUE)
+
+extract_data <- lapply(filenames, read_csv,na = "NA") 
+
+names(extract_data) <- filenames
+
+year_number = lapply(sapply(extract_data, rownames), function(x) length(x))
+filenames_filter_year = Filter(function(x) x >= 3, year_number)
+filenames_select_year <- names(filenames_filter_year)
+extract_final <- extract_data[names(extract_data) %in% filenames_select_year  ==  TRUE] #
+
+B <- 40000 #boot times
+num <- 10 # onece boot sample numbers from list
+n<-length (extract_final) #list lenth
+set.seed(123) 
+times_sum = sum(seq(1997,2014,by=1))
+corr_boot={}
+RK_boot={}
+judge_boot={}
+
+trend = function(data) {
+
+  mean_RK = mean(data$Rk)
+  
+  mean_var = data %>%
+    group_by(Year) %>%
+    summarize(V_nee = mean(nee,na.rm = TRUE),
+              V_CO2 = mean(CO2,na.rm = TRUE),
+              V_LE = mean(LE,na.rm = TRUE),
+              V_Temp = mean(Temp,na.rm = TRUE),
+              V_Pre = mean(Pre,na.rm = TRUE),
+              V_wue = mean(wue,na.rm = TRUE)) %>%
+    summarise_at(vars(matches("V")), ~lm(. ~ Year)$coefficients[2])
+  
+  
+  final_result = cbind(mean_RK,mean_var)
+  return(final_result)
+}
+
+
+for(b in 1:B){
+  list_sub<-extract_final[sample(1:n,num,replace=F)]
+  
+  trend_data = lapply(list_sub, trend)
+  
+  dt_sub_times = do.call(rbind.data.frame, list_sub)
+  
+  dt_sub = do.call(rbind.data.frame, trend_data)
+  
+  judge_times <- sum(unique(dt_sub_times$Year)) == times_sum
+  
+  mean_RK = mean(dt_sub$mean_RK,na.rm=T)
+  
+  corr = cor(dt_sub, method = c( "spearman"))[1,2:7]
+  
+  
+  print(corr)
+  RK_boot=rbind(RK_boot, mean_RK)
+  corr_boot=rbind(corr_boot,corr)
+  judge_boot=rbind(judge_boot,judge_times)
+}
+
+data_all = cbind(RK_boot,corr_boot,judge_boot)
+colnames(data_all) = c("RK","NEE","CO2","LE","Temp","Prep","WUE","Year")
+data_all = as.data.frame(data_all)
+full_year_boot = data_all %>% filter(Year == 1)
+write.csv(data_all, "bootstrapped_sample.csv",row.names=F)
+#######################################trend analysis for each sites, then 
+
+year_number = lapply(sapply(extract_data, rownames), function(x) length(x))
+filenames_filter_year = Filter(function(x) x > 3, year_number)
+filenames_select_year <- names(filenames_filter_year)
+extract_final <- extract_data[names(extract_data) %in% filenames_select_year  ==  TRUE] #
+
+function(data) {
+  mean_RK = mean(data$Rk)
+  
+  mean_var = data %>%
+    group_by(Year) %>%
+    summarize(nee = mean(nee,na.rm = TRUE),
+              CO2 = mean(CO2,na.rm = TRUE),
+              LE = mean(LE,na.rm = TRUE),
+              VPD = mean(VPD,na.rm = TRUE),
+              Temp = mean(Temp,na.rm = TRUE),
+              swc = mean(swc,na.rm = TRUE),
+              Pre = mean(Pre,na.rm = TRUE),
+              wue = mean(wue,na.rm = TRUE))
+  
+  trend_var = apply(mean_var[,2:9], 1,function(x){mk_trend(x[!is.na(x)])})
+  
+  final_result = cbind(mean_RK,trend_var)
+  return(final_result)
+}
+
+
+
+
