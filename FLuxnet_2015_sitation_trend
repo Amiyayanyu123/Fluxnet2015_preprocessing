@@ -1,0 +1,96 @@
+library(corrplot)
+library(nlme)
+library(ape)
+library(MuMIn)
+library(extrafont)
+library(tidyverse)
+library(lubridate)
+########################Fluxnet2015 CO2 yearly data analysis
+setwd("F:\\Fluxnet_Rk\\YY")
+
+filenames <- list.files(pattern="*.csv", full.names=TRUE)
+
+ldf <- lapply(filenames, read_csv,na = "-9999") 
+
+names(ldf) <- filenames
+
+names = c("TIMESTAMP","CO2_F_MDS","NEE_VUT_MEAN","P_F",
+          "LE_F_MDS","VPD_F_MDS","TA_F_MDS","SWC_F_MDS_1","GPP_DT_VUT_MEAN")
+
+variables_number = lapply(sapply(ldf, colnames), function(x) x %in% names)
+
+count_number = lapply(variables_number,sum,na.rm = TRUE)
+
+filenames_contain_all = Filter(function(x) x == 9, count_number)
+
+filenames_select <- names(filenames_contain_all)
+
+ldf_final <- ldf[names(ldf) %in% filenames_select  ==  TRUE] 
+
+data_extract_variables = function (data){
+  
+  subdata_1 = data %>% 
+    dplyr::select(TIMESTAMP,NEE_VUT_MEAN, CO2_F_MDS,P_F, #select variables
+                  LE_F_MDS,VPD_F_MDS,TA_F_MDS,SWC_F_MDS_1,GPP_DT_VUT_MEAN) %>%
+    rename(time = TIMESTAMP,nee = NEE_VUT_MEAN, CO2 = CO2_F_MDS, 
+           LE = LE_F_MDS,VPD = VPD_F_MDS,Temp = TA_F_MDS,swc = SWC_F_MDS_1,Pre = P_F,gpp = GPP_DT_VUT_MEAN)
+  
+    return(subdata_1)
+}
+
+ldf_final = lapply(ldf_final,data_extract_variables)
+
+ldf_final = lapply(ldf_final, function(x) na.omit(x))
+####################select year
+year_number = lapply(sapply(ldf_final, rownames), function(x) length(x))
+filenames_filter_year = Filter(function(x) x > 10, year_number) #check sites containing years over 6 
+filenames_select_year <- names(filenames_filter_year)
+extract_final <- ldf_final[names(ldf_final) %in% filenames_select_year  ==  TRUE] #
+####################standardlize variables and correlation analysis
+data = extract_final$`./FLX_AU-How_FLUXNET2015_FULLSET_YY_2001-2014_1-4.csv`
+
+
+trend = function(data) {
+  count_years = nrow(data)
+  
+  sub_data = data %>% dplyr::select(time,nee,CO2,Pre,LE,VPD,Temp,swc,gpp) %>%
+    mutate(CO2_scale = scale(CO2),nee_scale = scale(nee),Pre_scale = scale(Pre),
+           LE_scale = scale(LE),VPD_scale = scale(VPD),Temp_scale = scale(Temp),gpp_scale = scale(gpp)
+           ) %>% na.omit() 
+  
+  coeff = sub_data%>% 
+    summarise_at(vars(matches("scale")), ~lm(. ~ time)$coefficients[2])
+  
+  p_value = sub_data%>% 
+    summarise_at(vars(CO2_scale:gpp_scale), list(
+      p = ~summary(lm(formula = .x ~ time))$coefficients[1,4]
+    ))
+    
+  corr = cor(sub_data, method = c( "spearman"))[1,10:16]
+  
+  testcor= cor.mtest(sub_data,method = c( "spearman"), conf.level = 0.95)$p[1,10:16]
+  
+  final_result = rbind(corr,testcor,coeff,p_value)
+  
+  return(final_result)
+}
+#######plot 
+CO2_trend_data = lapply(extract_final, trend)
+
+CO2_data_frame = do.call(rbind.data.frame,CO2_trend_data)
+
+CO2_data_frame = rownames_to_column(CO2_data_frame,var = "site")
+
+CO2_data_frame$station = str_sub(CO2_data_frame$site, start = 7, end = 12)
+
+CO2_data_frame$class = with(CO2_data_frame,ifelse (corr>=0 & testcor <= 0.05,1),
+                            ifelse(CO2_data_frame$corr > 0 & CO2_data_frame$testcor >= 0.05,2),
+                            ifelse(CO2_data_frame$corr <= 0 & CO2_data_frame$testcor <= 0.05,3,4))
+
+
+ggplot(data=CO2_data_frame, aes(x=station, y=corr)) +
+  geom_bar(stat="identity",width=0.5)+ labs(x="Stations", y = "Corrlation R")+ theme_bw()+
+  theme(axis.text.x = element_text(face="plain",color="black", size=14,angle=90),
+        axis.text.y = element_text(face="plain",color="black", size=14),
+        axis.title=element_text(size=18,face="bold",color="black") ,
+        legend.position="right",strip.text = element_text(size=18)) 
