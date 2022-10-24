@@ -1,0 +1,55 @@
+library(corrplot)
+library(nlme)
+library(ape)
+library(MuMIn)
+library(extrafont)
+library(tidyverse)
+library(lubridate)
+########################Fluxnet2015 CO2 yearly data analysis
+setwd("F:\\Fluxnet_Rk\\YY")
+
+filenames <- list.files(pattern="*.csv", full.names=TRUE)
+
+ldf <- lapply(filenames, read_csv,na = "-9999") 
+
+names(ldf) <- filenames
+
+names = c("TIMESTAMP","CO2_F_MDS","NEE_VUT_MEAN","P_F",
+          "LE_F_MDS","VPD_F_MDS","TA_F_MDS","SWC_F_MDS_1","GPP_DT_VUT_MEAN")
+
+variables_number = lapply(sapply(ldf, colnames), function(x) x %in% names[1])
+
+count_number = lapply(variables_number,sum,na.rm = TRUE)
+
+filenames_contain_all = Filter(function(x) x == 9, count_number)
+
+filenames_select <- names(filenames_contain_all)
+
+ldf_final <- ldf[names(ldf) %in% filenames_select  ==  TRUE] 
+
+data_extract_variables = function (data){
+  
+  subdata_1 = data %>% 
+    dplyr::select(TIMESTAMP,NEE_VUT_MEAN, CO2_F_MDS,P_F, #select variables
+                  LE_F_MDS,VPD_F_MDS,TA_F_MDS,SWC_F_MDS_1,GPP_DT_VUT_MEAN) %>%
+    rename(time = TIMESTAMP,nee = NEE_VUT_MEAN, CO2 = CO2_F_MDS, 
+           LE = LE_F_MDS,VPD = VPD_F_MDS,Temp = TA_F_MDS,swc = SWC_F_MDS_1,Pre = P_F,gpp = GPP_DT_VUT_MEAN) %>%
+    mutate(wue_scale = scale(gpp/LE),CO2_scale = scale(CO2),nee_scale = scale(nee),Pre_scale = scale(Pre),
+           LE_scale = scale(LE),VPD_scale = scale(VPD),Temp_scale = scale(Temp),gpp_scale = scale(gpp),swc_scale = scale(swc))
+  
+  return(subdata_1)
+}
+
+ldf_final = lapply(ldf_final,data_extract_variables)
+
+ldf_final = lapply(ldf_final, function(x) na.omit(x))
+###########################################exract yearly data
+yearly_data_frame = do.call(rbind.data.frame,ldf_final)
+
+yearly_data_frame = rownames_to_column(yearly_data_frame,var = "site")
+
+yearly_data_frame$station = str_sub(yearly_data_frame$site, start = 7, end = 12)
+
+yearly_data_frame$observation = str_sub(yearly_data_frame$site, start = 37, end = 45)
+
+write.csv(yearly_data_frame, "yearly_data_frame.csv",row.names=T)
